@@ -1,8 +1,6 @@
 # Book Cleaner + TTS Chunks
 
-Полный пайплайн подготовки книги к озвучке в **Yandex SpeechKit v3** при помощи **локальной LLM через Ollama** (опционально — OpenAI): очистка «грязного» TXT → склейка → нарезка на 200‑символьные кусочки → массовая озвучка в MP3.
-
-> По умолчанию используется **локальная Ollama** (бесплатно, офлайн). Облачный OpenAI оставлен как опция — достаточно переключить `LLM_BACKEND` в `.env`.
+Полный пайплайн подготовки книги к озвучке в **Yandex SpeechKit v3** при помощи **GPT‑5 nano (OpenAI API)**: очистка «грязного» TXT → склейка → нарезка на 200‑символьные кусочки → массовая озвучка в MP3.
 
 ---
 
@@ -20,10 +18,7 @@ pdftotext book.pdf book.txt
 
 * Python 3.10+ (рекомендуется 3.12)
 * macOS / Linux
-* **Ollama** (для локальной очистки текста) — [установка](https://ollama.com/)
-* Ключ Yandex SpeechKit (API Key **или** IAM+Folder)
-
-> Альтернатива: вместо Ollama можно использовать облачный OpenAI API — см. `LLM_BACKEND=openai` в `.env`.
+* Аккаунт OpenAI (ключ для модели очистки) и ключ Yandex SpeechKit (API Key **или** IAM+Folder)
 
 ---
 
@@ -32,31 +27,10 @@ pdftotext book.pdf book.txt
 В корне проекта:
 
 ```bash
-cd ~/Git/Text2Speech/PDF-book-to-Audio-TTS
+cd ~/Downloads/speechKit_books/v2
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### Установка и запуск Ollama
-
-```bash
-# 1. Установить Ollama (если ещё нет): https://ollama.com/download
-# 2. Запустить сервис (обычно запускается автоматически)
-ollama serve
-
-# 3. Скачать чат-модель (выберите одну)
-ollama pull llama3.1:8b     # ~4.9 ГБ, хороший баланс
-# или
-ollama pull qwen2.5:7b      # ~4.9 ГБ, отлично знает русский
-# или
-ollama pull gemma2:9b       # ~5.0 ГБ, быстрая
-```
-
-Проверить установленные модели:
-
-```bash
-ollama list
 ```
 
 ---
@@ -66,27 +40,14 @@ ollama list
 Создайте файл `.env` (либо на основе `.env.example`) и заполните:
 
 ```env
-# Бэкенд LLM: ollama (локально, по умолчанию) или openai (облако)
-LLM_BACKEND=ollama
-
-# === Ollama (локальная модель) ===
-OLLAMA_BASE_URL=http://localhost:11434/v1
-OLLAMA_MODEL=llama3.1:8b
-OLLAMA_API_KEY=ollama        # фиктивный ключ, Ollama его не проверяет
-
-# === OpenAI (только если LLM_BACKEND=openai) ===
-# OPENAI_API_KEY=sk-ваш-ключ
-# OPENAI_MODEL=gpt-5-nano
-
-# === Общие настройки LLM ===
-LLM_TEMPERATURE=0
-LLM_TIMEOUT=600
-MAX_CONTENT_TOKENS=9500
-
+# OpenAI (очистка текста)
+OPENAI_API_KEY=sk-ваш-ключ
 BOOK_PATH=./data/book.txt
 OUT_DIR=./out
+OPENAI_MODEL=gpt-5-nano
+MAX_CONTENT_TOKENS=9500
 
-# === Yandex SpeechKit (любой из вариантов) ===
+# Yandex SpeechKit (любой из вариантов)
 # Вариант A — API-ключ (проще; FOLDER_ID не нужен)
 SPEECHKIT_API_KEY=yc-ваш-api-key
 
@@ -95,7 +56,7 @@ SPEECHKIT_API_KEY=yc-ваш-api-key
 # FOLDER_ID=...  
 ```
 
-> Имя модели в `OLLAMA_MODEL` должно совпадать с тем, что выдаёт `ollama list`. Переключение между Ollama и OpenAI делается одной переменной `LLM_BACKEND` — код менять не нужно.
+> В скрипте TTS переменные из `.env` подхватываются автоматически (через `python-dotenv`). Если нужно, можно передать креды флагами `--api-key` или `--iam-token`/`--folder-id` при запуске.
 
 ---
 
@@ -127,9 +88,7 @@ book-cleaner-tts/
 
 ## ▶️ Шаг 1. Очистка книги и подготовка чанков
 
-Скрипт читает `data/book.txt`, делит на чанки ≤ 9500 токенов (без разрыва слов), отправляет каждый в локальную модель Ollama (по умолчанию) с промптом‑«чистильщиком», склеивает ответы и режет на кусочки ≤ 200 символов.
-
-> Ollama использует OpenAI‑совместимый эндпоинт (`/v1`), поэтому обращение идёт через стандартный `openai` SDK — просто с другим `base_url`. Это же позволяет в любой момент переключиться на облако через `LLM_BACKEND=openai`.
+Скрипт читает `data/book.txt`, делит на чанки ≤ 9500 токенов (без разрыва слов), отправляет каждый в GPT‑5 nano с промптом‑«чистильщиком», склеивает ответы и режет на кусочки ≤ 200 символов.
 
 Запуск:
 
@@ -218,9 +177,6 @@ python -m scripts.tts_speechkit_v3 --container WAV
 * **`Unknown role '...' for 'filipp' voice` (HTTP 400)** — указанная роль голосом не поддерживается. Либо не передавайте `--role` (по умолчанию роль отключена), либо используйте голос с поддержкой нужной роли.
 * **429/5xx** — временные ограничения/ошибки. Скрипт делает ретраи; при частых 429 увеличьте `--sleep` (например, `0.4`–`1.0`).
 * **Прервался процесс** — перезапустите с `--start <N>` (номер следующего файла по списку).
-* **Ollama: `model not found` / `404`** — модель не скачана. Выполните `ollama pull <OLLAMA_MODEL>` и проверьте `ollama list`.
-* **Ollama: `connection refused`** — сервис не запущен. Запустите `ollama serve`.
-* **Ollama отвечает пустой строкой** — увеличьте `LLM_TIMEOUT` (модель могла не уложиться во время генерации) и проверьте, что модель поддерживает чат (а не только эмбеддинги, как `qwen-embed`).
 
 ---
 
@@ -228,7 +184,7 @@ python -m scripts.tts_speechkit_v3 --container WAV
 
 * Разделение на 9500 токенов оставляет запас до лимита 10 000 с учётом системного промпта.
 * Чанки по 200 символов не рвут слова (резка по границам предложений/слов).
-* По умолчанию используется **локальная Ollama** (`LLM_BACKEND=ollama`). Для неё `temperature=0` передаётся явно — она поддерживается. Облачный `gpt-5-nano` может не принимать `temperature` — тогда переключите `LLM_BACKEND=openai` (код передаёт `temperature`, при ошибке 400 уберите параметр).
+* Для `gpt-5-nano` опции вроде `temperature` могут быть неподдержаны — мы их не передаём.
 * Папка `out/audio` содержит готовые MP3; для дальнейшей склейки можно использовать, например, `ffmpeg` или `pydub` (не входит в текущий проект).
 
 ---
@@ -260,9 +216,8 @@ python -m scripts.tts_speechkit_v3 --voice filipp --speed 1.1 --container MP3
 # из корня проекта
 cd out/audio
 
-# создаём список файлов в правильном порядке (лучше через printf)
-ls -1 *.mp3 | sort | awk '{print "file \"" $0 "\""}' > list.txt
-printf 'file %s\n' *.mp3 > list.txt
+# создаём список файлов в правильном порядке
+ls -1 *.mp3 | sort | awk '{print "file \\"" $0 "\\""}' > list.txt
 
 # склеиваем без перекодирования
 ffmpeg -f concat -safe 0 -i list.txt -c copy ../book_full.mp3

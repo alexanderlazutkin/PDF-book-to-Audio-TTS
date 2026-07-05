@@ -1,10 +1,9 @@
 # scripts/clean_and_chunk_book.py
 
+import os
 import json
 from pathlib import Path
 from typing import List
-
-from openai import OpenAI
 
 from project_config import settings
 from scripts import utils
@@ -31,41 +30,42 @@ CLEAN_PROMPT = """Ты — чистильщик текста для подгот
 """
 
 
-def _build_client() -> tuple[OpenAI, dict]:
-    """
-    Создаёт OpenAI-совместимый клиент под выбранный бэкенд (OpenAI или Ollama).
+from openai import OpenAI, BadRequestError
 
-    Возвращает (client, llm_config).
-    """
-    cfg = settings.get_llm_config()
-    backend = settings.LLM_BACKEND.upper()
+def openai_clean_chunk(chunk_text: str) -> str:
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY не задан (см. .env)")
 
-    if not cfg["api_key"] and settings.LLM_BACKEND != "ollama":
-        raise RuntimeError(
-            f"Для бэкенда '{backend}' не задан API-ключ (OPENAI_API_KEY в .env)."
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+    try:
+        # Без temperature — у некоторых моделей допустимо только дефолтное значение
+        resp = client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": CLEAN_PROMPT},
+                {"role": "user", "content": chunk_text},
+            ],
         )
+        return resp.choices[0].message.content.strip()
+    except BadRequestError:
+        # Фолбэк на Responses API
+        r = client.responses.create(
+            model=settings.OPENAI_MODEL,
+            input=chunk_text,
+            instructions=CLEAN_PROMPT,
+        )
+        return r.output_text.strip()
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY не задан (см. .env)")
 
-    client = OpenAI(
-        api_key=cfg["api_key"],
-        base_url=cfg["base_url"],
-        timeout=settings.LLM_TIMEOUT,
-    )
-    print(f"[LLM] backend={backend} model={cfg['model']} base_url={cfg['base_url']}")
-    return client, cfg
-
-
-def clean_chunk(chunk_text: str, client: OpenAI, model: str) -> str:
-    """
-    Очищает один чанк текста через chat.completions.
-    Работает и с OpenAI, и с Ollama (последняя совместима с OpenAI API).
-    """
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
     resp = client.chat.completions.create(
-        model=model,
+        model=settings.OPENAI_MODEL,
         messages=[
             {"role": "system", "content": CLEAN_PROMPT},
             {"role": "user", "content": chunk_text},
         ],
-        temperature=settings.LLM_TEMPERATURE,
     )
     return resp.choices[0].message.content.strip()
 
@@ -90,17 +90,16 @@ def main():
     raw = input_path.read_text(encoding="utf-8")
     text = utils.soft_normalize(raw)
 
+    # Разбиваем на чанки для LLM
     chunks = utils.chunk_by_tokens(text, settings.MAX_CONTENT_TOKENS)
     print(f"Исходный текст: {len(text):,} символов")
     print(f"Чанков для очистки: {len(chunks)}")
-
-    client, cfg = _build_client()
 
     cleaned_chunks = []
     for i, ch in enumerate(chunks, 1):
         tokens = utils.count_tokens(ch)
         print(f"[{i}/{len(chunks)}] → {tokens:,} токенов, {len(ch):,} символов")
-        cleaned = clean_chunk(ch, client=client, model=cfg["model"])
+        cleaned = openai_clean_chunk(ch)
         cleaned_chunks.append(cleaned)
 
     cleaned_full = "\n\n".join(cleaned_chunks).strip()
@@ -108,6 +107,7 @@ def main():
     save_text(cleaned_path, cleaned_full)
     print(f"Готово: {cleaned_path} ({len(cleaned_full):,} символов)")
 
+    # Разбиваем для TTS
     tts_chunks = utils.split_for_tts(cleaned_full, settings.SPEECHKIT_CHUNK_SIZE)
     tts_dir = out_dir / "speechkit_chunks"
     save_chunks(tts_chunks, tts_dir)
